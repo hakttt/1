@@ -1,120 +1,127 @@
 import streamlit as st
 import yfinance as yf
-import numpy as np
 import pandas as pd
+import numpy as np
 import ta
 
-# Dosyadan tickerları oku
-def load_tickers(path):
-    with open(path, "r") as f:
-        tickers = f.read().strip().split("-")
-    return tickers
+st.set_page_config(page_title="LRC & Tek SAR Tarayıcı", layout="wide")
 
-tickers_nasdaq = load_tickers("tickers_nasdaq.txt")
-tickers_nyse = load_tickers("tickers_nyse.txt")
+# --- Tüm Ticker Listeleri ---
+with open("tickers_nyse.txt", "r") as f:
+    tickers_nyse = f.read().strip().split("-")
 
-# LRC hesaplama fonksiyonu
-def linear_regression_channel(df, length=300):
+with open("tickers_nasdaq.txt", "r") as f:
+    tickers_nasdaq = f.read().strip().split("-")
+
+
+# --- LRC Hesaplama Fonksiyonu ---
+def calculate_lrc_channel(df, length=300):
     if len(df) < length:
         return None, None
+
     y = df['Close'][-length:].values
     x = np.arange(length)
     coeffs = np.polyfit(x, y, 1)
-    slope, intercept = coeffs
-    y_fit = slope * x + intercept
-    resid = y - y_fit
-    std_dev = np.std(resid)
+    y_fit = coeffs[0] * x + coeffs[1]
+    std_dev = np.std(y - y_fit)
     upper = y_fit + std_dev
     lower = y_fit - std_dev
     return upper, lower
 
-# LRC kesişme kontrolü
-def check_lrc_cross(df, lookback=20):
-    if len(df) < 300 + lookback:
-        return None
-    upper, lower = linear_regression_channel(df, 300)
+# --- LRC Kesişme Kontrolü ---
+def check_lrc_cross(df, bars_to_check=20):
+    upper, lower = calculate_lrc_channel(df)
     if upper is None or lower is None:
         return None
-    close = df['Close']
-    for i in range(lookback):
-        if close.iloc[-i-2] < upper[-i-2] and close.iloc[-i-1] > upper[-i-1]:
-            return "Cross Over"
-        if close.iloc[-i-2] > lower[-i-2] and close.iloc[-i-1] < lower[-i-1]:
-            return "Cross Under"
-    return None
 
-# Tek SAR sinyali (basit örnek)
-def check_sar_signal(df):
-    if len(df) < 2:
+    closes = df['Close'].values
+    signal = None
+    for i in range(bars_to_check):
+        if closes[-i-2] < upper[-i-2] and closes[-i-1] > upper[-i-1]:
+            signal = ("Cross Over", df.index[-i-1].strftime("%Y-%m-%d"))
+            break
+        elif closes[-i-2] > lower[-i-2] and closes[-i-1] < lower[-i-1]:
+            signal = ("Cross Under", df.index[-i-1].strftime("%Y-%m-%d"))
+            break
+    return signal
+
+
+# --- SAR Tespiti ---
+def check_tek_sar(df, bars_to_check=20):
+    if len(df) < bars_to_check + 2:
         return None
-    sar = ta.trend.PSARIndicator(df['High'], df['Low'], df['Close'], step=0.02, max_step=0.2)
-    sar_values = sar.psar()
-    close = df['Close']
-    # Son bar için sar altı veya üstü sinyal basit kontrolü
-    if close.iloc[-2] < sar_values.iloc[-2] and close.iloc[-1] > sar_values.iloc[-1]:
-        return "SAR Cross Up"
-    if close.iloc[-2] > sar_values.iloc[-2] and close.iloc[-1] < sar_values.iloc[-1]:
-        return "SAR Cross Down"
-    return None
 
-# Streamlit başlığı ve ayarlar
-st.title("NASDAQ & NYSE LRC ve Tek SAR Tarayıcı")
+    df['SAR'] = ta.trend.PSARIndicator(high=df['High'], low=df['Low'], close=df['Close']).psar()
 
+    sar = df['SAR'].values
+    close = df['Close'].values
+    signal = None
+    for i in range(bars_to_check):
+        prev_close, curr_close = close[-i-2], close[-i-1]
+        prev_sar, curr_sar = sar[-i-2], sar[-i-1]
+
+        # SAR aşağıdan yukarı keserse sinyal
+        if prev_close < prev_sar and curr_close > curr_sar:
+            signal = ("SAR Cross Over", df.index[-i-1].strftime("%Y-%m-%d"))
+            break
+        elif prev_close > prev_sar and curr_close < curr_sar:
+            signal = ("SAR Cross Under", df.index[-i-1].strftime("%Y-%m-%d"))
+            break
+    return signal
+
+
+# --- Streamlit Arayüz ---
+st.title("📈 LRC ve Tek SAR Tarayıcı")
+
+exchange = st.radio("Borsa", ["NASDAQ", "NYSE"])
 interval_map = {
-    "1 Week": "1wk",
-    "3 Days": "3d",
-    "1 Day": "1d",
-    "4 Hours": "4h"
+    "1 Hafta": "1wk",
+    "3 Gün": "3d",
+    "1 Gün": "1d",
+    "4 Saat": "4h"
 }
+interval_label = st.selectbox("Zaman Dilimi", list(interval_map.keys()))
+interval = interval_map[interval_label]
 
-selected_interval = st.selectbox("Zaman Dilimini Seçiniz", list(interval_map.keys()), index=1)
-exchange = st.radio("Borsa Seçiniz", ["NASDAQ", "NYSE"])
-lookback = st.number_input("Son Kaç Barda Kesişme Ara", min_value=1, max_value=50, value=20, step=1)
-scan_lrc = st.checkbox("LRC Kesişmelerini Tara", value=True)
-scan_sar = st.checkbox("Tek SAR Sinyallerini Tara", value=False)
+scan_mode = st.radio("Tarama Türü", ["Sadece LRC", "Sadece Tek SAR", "Her İkisi"])
+bars_to_check = st.slider("Son kaç bar taransın?", 5, 100, 20)
 
-if st.button("Taramayı Başlat"):
+if st.button("🔍 Taramayı Başlat"):
+    st.info("Veriler indiriliyor ve analiz ediliyor...")
 
     tickers = tickers_nasdaq if exchange == "NASDAQ" else tickers_nyse
-    st.info(f"{exchange} borsasında {len(tickers)} hisse, {selected_interval} zaman diliminde, son {lookback} bardaki sinyaller aranıyor...")
-
     results = []
 
     for ticker in tickers:
         try:
-            df = yf.download(ticker, period="300d", interval=interval_map[selected_interval], progress=False)
+            df = yf.download(ticker, period="300d", interval=interval, progress=False)
             if df.empty:
                 continue
 
-            # LRC kontrolü
-            if scan_lrc:
-                lrc_signal = check_lrc_cross(df, lookback)
-                if lrc_signal:
-                    results.append({
-                        "Ticker": ticker,
-                        "Signal": lrc_signal,
-                        "Type": "LRC",
-                        "Price": df['Close'].iloc[-1]
-                    })
+            entry = {"Ticker": ticker}
 
-            # SAR kontrolü
-            if scan_sar:
-                sar_signal = check_sar_signal(df)
-                if sar_signal:
-                    results.append({
-                        "Ticker": ticker,
-                        "Signal": sar_signal,
-                        "Type": "SAR",
-                        "Price": df['Close'].iloc[-1]
-                    })
+            if scan_mode in ["Sadece LRC", "Her İkisi"]:
+                lrc = check_lrc_cross(df, bars_to_check)
+                if lrc:
+                    entry["LRC"] = lrc[0]
+                    entry["LRC Date"] = lrc[1]
+
+            if scan_mode in ["Sadece Tek SAR", "Her İkisi"]:
+                sar = check_tek_sar(df, bars_to_check)
+                if sar:
+                    entry["SAR"] = sar[0]
+                    entry["SAR Date"] = sar[1]
+
+            if "LRC" in entry or "SAR" in entry:
+                results.append(entry)
 
         except Exception as e:
-            # İstersen hata logla: st.error(f"{ticker} için hata: {e}")
-            pass
+            st.error(f"{ticker} için hata: {e}")
+            continue
 
     if results:
-        df_res = pd.DataFrame(results)
-        st.success(f"{len(results)} sinyal bulundu.")
-        st.dataframe(df_res)
+        df_result = pd.DataFrame(results)
+        st.success(f"{len(results)} sonuç bulundu.")
+        st.dataframe(df_result)
     else:
-        st.warning("Hiç sinyal bulunamadı.")
+        st.warning("Hiçbir sinyal bulunamadı.")
