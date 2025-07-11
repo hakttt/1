@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-def download_data(ticker, period="2y", interval="1d"):
+def download_data(ticker, period="10y", interval="1d"):
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False)
         df.dropna(inplace=True)
